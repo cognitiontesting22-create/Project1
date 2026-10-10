@@ -1,0 +1,200 @@
+export type Group = {
+  id: number;
+  name: string;
+  description: string;
+  emoji: string;
+  currency: string;
+  created_at: string;
+};
+
+export type Member = {
+  id: number;
+  group_id: number;
+  name: string;
+  email: string | null;
+  created_at: string;
+};
+
+export type SplitType = 'equal' | 'exact' | 'percent' | 'shares';
+
+export const SPLIT_TYPES: SplitType[] = ['equal', 'exact', 'percent', 'shares'];
+
+export function isSplitType(value: string): value is SplitType {
+  return (SPLIT_TYPES as string[]).includes(value);
+}
+
+/** Past tense, for "split …" in the expense list. */
+export const SPLIT_LABELS: Record<SplitType, string> = {
+  equal: 'equally',
+  exact: 'by exact amounts',
+  percent: 'by percentage',
+  shares: 'by shares',
+};
+
+/** Columns every money-carrying row shares once currencies are in play. */
+export type Converted = {
+  /** Always in the group's currency — this is what balances are built from. */
+  amount_cents: number;
+  /** What the user typed, in the currency they typed it in. */
+  original_amount_cents: number;
+  original_currency: string;
+  /** The original→group rate this row was booked at, scaled by 1e8. */
+  rate_e8: number;
+};
+
+export type Expense = Converted & {
+  id: number;
+  group_id: number;
+  description: string;
+  paid_by: number;
+  category: string;
+  split_type: SplitType;
+  spent_at: string;
+  created_at: string;
+  /** Set when this row was materialised from a recurring template. */
+  recurring_id: number | null;
+  /** The schedule period it covers, e.g. "2026-02". */
+  period: string | null;
+};
+
+export type ExchangeRate = {
+  currency: string;
+  rate_e8: number;
+  updated_at: string;
+};
+
+export type Split = {
+  member_id: number;
+  amount_cents: number;
+  /**
+   * What the user typed, in hundredths of the split's unit: basis points for
+   * `percent`, centishares for `shares`, null when `amount_cents` is itself the
+   * input (`equal`, `exact`).
+   */
+  weight: number | null;
+};
+
+export type ExpenseWithSplits = Expense & {
+  paid_by_name: string;
+  splits: (Split & { name: string })[];
+};
+
+export type Settlement = Converted & {
+  id: number;
+  group_id: number;
+  from_member_id: number;
+  to_member_id: number;
+  note: string;
+  settled_at: string;
+  created_at: string;
+};
+
+export type SettlementWithNames = Settlement & {
+  from_name: string;
+  to_name: string;
+};
+
+/** Net position for a member: positive = owed money, negative = owes money. */
+export type Balance = {
+  member_id: number;
+  name: string;
+  paid_cents: number;
+  owed_cents: number;
+  net_cents: number;
+};
+
+/** A single "X pays Y $Z" instruction from the debt simplifier. */
+export type Debt = {
+  from_member_id: number;
+  from_name: string;
+  to_member_id: number;
+  to_name: string;
+  amount_cents: number;
+};
+
+export type GroupSummary = Group & {
+  member_count: number;
+  member_names: string[];
+  expense_count: number;
+  total_cents: number;
+};
+
+export const CATEGORIES = [
+  { id: 'general', label: 'General', emoji: '🧾' },
+  { id: 'food', label: 'Food & Drink', emoji: '🍜' },
+  { id: 'rent', label: 'Rent & Utilities', emoji: '🏠' },
+  { id: 'travel', label: 'Travel', emoji: '✈️' },
+  { id: 'transport', label: 'Transport', emoji: '🚕' },
+  { id: 'fun', label: 'Entertainment', emoji: '🎉' },
+  { id: 'shopping', label: 'Shopping', emoji: '🛍️' },
+] as const;
+
+export function categoryMeta(id: string) {
+  return CATEGORIES.find((c) => c.id === id) ?? CATEGORIES[0];
+}
+
+/* ------------------------------------------------- recurring & plans */
+
+export type RecurringExpense = {
+  id: number;
+  group_id: number;
+  description: string;
+  amount_cents: number;
+  currency: string;
+  paid_by: number;
+  paid_by_name: string;
+  category: string;
+  split_type: SplitType;
+  /** Day of the month it targets; short months clamp to their last day. */
+  anchor_day: number;
+  interval_months: number;
+  start_date: string;
+  end_date: string | null;
+  active: number;
+  created_at: string;
+  posted_count: number;
+  participants: { member_id: number; name: string; value: number | null }[];
+  /** Null when paused or finished. */
+  next_due: string | null;
+};
+
+export type PlanInstallment = {
+  id: number;
+  plan_id: number;
+  number: number;
+  due_date: string;
+  period: string;
+  payment_cents: number;
+  principal_cents: number;
+  interest_cents: number;
+  balance_cents: number;
+  in_grace: number;
+  posted_at: string | null;
+  settlement_id: number | null;
+  interest_expense_id: number | null;
+};
+
+export type PaymentPlan = {
+  id: number;
+  group_id: number;
+  debtor_id: number;
+  debtor_name: string;
+  creditor_id: number;
+  creditor_name: string;
+  principal_cents: number;
+  apr_bp: number;
+  installments: number;
+  grace_periods: number;
+  anchor_day: number;
+  start_date: string;
+  note: string;
+  cancelled: number;
+  created_at: string;
+  schedule: PlanInstallment[];
+  paid_count: number;
+  paid_cents: number;
+  remaining_cents: number;
+  interest_cents: number;
+  total_cents: number;
+  next_due: string | null;
+};

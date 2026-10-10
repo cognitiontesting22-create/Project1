@@ -1,0 +1,89 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --font-sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  }
+
+  html {
+    color-scheme: dark;
+  }
+
+  body {
+    @apply bg-ink-950 text-slate-200 antialiased;
+    background-image:
+      radial-gradient(60rem 40rem at 12% -10%, rgba(34, 211, 154, 0.12), transparent 60%),
+      radial-gradient(50rem 36rem at 92% 0%, rgba(139, 92, 246, 0.14), transparent 60%);
+    background-attachment: fixed;
+    min-height: 100vh;
+  }
+
+  ::selection {
+    @apply bg-brand-500/30 text-white;
+  }
+
+  /* Keep the dark theme consistent down to the scrollbar and form controls. */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply rounded-full bg-ink-600;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-ink-500;
+  }
+}
+
+@layer components {
+  .card {
+    @apply rounded-2xl border border-white/[0.07] bg-ink-900/70 backdrop-blur-xl
+           shadow-[0_1px_0_0_rgba(255,255,255,0.04)_inset,0_20px_40px_-24px_rgba(0,0,0,0.9)];
+  }
+
+  .card-hover {
+    @apply transition duration-200 hover:border-white/[0.14] hover:bg-ink-850/80
+           hover:shadow-[0_1px_0_0_rgba(255,255,255,0.06)_inset,0_28px_60px_-28px_rgba(0,0,0,1)];
+  }
+
+  .input {
+    @apply w-full rounded-xl border border-white/[0.08] bg-ink-950/60 px-3.5 py-2.5 text-sm
+           text-slate-100 placeholder:text-slate-500 outline-none transition
+           focus:border-brand-500/60 focus:ring-2 focus:ring-brand-500/20;
+  }
+
+  .label {
+    @apply mb-1.5 block text-xs font-medium uppercase tracking-wider text-slate-400;
+  }
+
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm
+           font-semibold transition active:scale-[0.98] disabled:cursor-not-allowed
+           disabled:opacity-50 disabled:active:scale-100;
+  }
+
+  .btn-primary {
+    @apply btn bg-gradient-to-br from-brand-400 to-brand-600 text-ink-950
+           shadow-lg shadow-brand-600/20 hover:brightness-110;
+  }
+
+  .btn-ghost {
+    @apply btn border border-white/[0.08] bg-white/[0.03] text-slate-200
+           hover:border-white/[0.16] hover:bg-white/[0.07];
+  }
+
+  .btn-danger {
+    @apply btn border border-rose-500/25 bg-rose-500/10 text-rose-300
+           hover:border-rose-500/45 hover:bg-rose-500/20;
+  }
+
+  .chip {
+    @apply inline-flex items-center gap-1.5 rounded-full border border-white/[0.08]
+           bg-white/[0.04] px-2.5 py-1 text-xs font-medium text-slate-300;
+  }
+}
