@@ -32,6 +32,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               <Link href="/" className="btn-ghost">
                 Groups
               </Link>
+              <Link href="/people" className="btn-ghost">
+                People
+              </Link>
               <Link href="/rates" className="btn-ghost">
                 Currencies
               </Link>

@@ -4,7 +4,9 @@ import { revalidatePath } from 'next/cache';
 import { redirect } from 'next/navigation';
 import { rateFromInput } from '@/lib/currency';
 import { toBasisPoints, toCents } from '@/lib/money';
+import * as pq from '@/lib/people-queries';
 import * as q from '@/lib/queries';
+import { allocateReceipt } from '@/lib/receipts';
 import * as sq from '@/lib/scheduling-queries';
 import { today as todayISO } from '@/lib/schedule';
 import { isSplitType, type SplitType } from '@/lib/types';
@@ -370,4 +372,155 @@ export async function deletePlanAction(formData: FormData): Promise<void> {
     // A plan with posted instalments can only be cancelled; ignore and re-render.
   }
   revalidatePath(`/groups/${groupId}`);
+}
+
+/* ------------------------------------------------------- itemised receipts */
+
+type ReceiptItemPayload = { description: string; amount: string; memberIds: number[] };
+
+/**
+ * Builds an expense from an itemised bill. The allocator assigns each item to
+ * the people who had it, spreads tax and tip in proportion to those subtotals,
+ * and guarantees the per-person totals add up to the bill exactly — so the
+ * expense can then be written as ordinary exact splits.
+ */
+export async function createReceiptAction(
+  _prev: ActionResult | null,
+  formData: FormData
+): Promise<ActionResult> {
+  const groupId = Number(formData.get('groupId'));
+  const description = String(formData.get('description') ?? '').trim();
+  const paidBy = Number(formData.get('paidBy'));
+
+  if (!description) return fail('What was this bill for?');
+  if (!Number.isFinite(paidBy)) return fail('Pick who paid.');
+
+  const group = q.getGroup(groupId);
+  if (!group) return fail('That group no longer exists.');
+
+  let payload: ReceiptItemPayload[];
+  try {
+    payload = JSON.parse(String(formData.get('items') ?? '[]')) as ReceiptItemPayload[];
+  } catch {
+    return fail('Could not read the items on this receipt.');
+  }
+  if (!Array.isArray(payload) || payload.length === 0) {
+    return fail('Add at least one item to the receipt.');
+  }
+
+  const taxCents = toCents(String(formData.get('tax') ?? '0')) || 0;
+  const tipCents = toCents(String(formData.get('tip') ?? '0')) || 0;
+
+  const items = payload.map((item, index) => ({
+    id: index,
+    description: String(item.description ?? '').trim() || `Item ${index + 1}`,
+    amountCents: toCents(String(item.amount ?? '')),
+    memberIds: (item.memberIds ?? []).map(Number).filter((n) => Number.isFinite(n)),
+  }));
+
+  let allocation;
+  try {
+    allocation = allocateReceipt({ items, taxCents, tipCents });
+  } catch (err) {
+    return fail(err instanceof Error ? err.message : 'That receipt does not add up.');
+  }
+
+  const participants = allocation.members.map((m) => m.member_id);
+  const values = Object.fromEntries(allocation.members.map((m) => [m.member_id, m.total_cents]));
+  const breakdown = Object.fromEntries(
+    allocation.members.map((m) => [
+      m.member_id,
+      { items_cents: m.items_cents, tax_cents: m.tax_cents, tip_cents: m.tip_cents },
+    ])
+  );
+
+  try {
+    q.createExpense({
+      groupId,
+      description,
+      amountCents: allocation.total_cents,
+      paidBy,
+      category: String(formData.get('category') ?? 'food'),
+      splitType: 'items',
+      spentAt: String(formData.get('spentAt') ?? '') || undefined,
+      participants,
+      values,
+      currency: String(formData.get('currency') ?? '') || group.currency,
+      receiptBreakdown: breakdown,
+      receipt: {
+        taxCents,
+        tipCents,
+        items: items.map((item) => ({
+          description: item.description,
+          amountCents: item.amountCents,
+          shares: allocation.itemShares
+            .filter((s) => s.item_id === item.id)
+            .map((s) => ({ member_id: s.member_id, amount_cents: s.amount_cents })),
+        })),
+      },
+    });
+  } catch (err) {
+    return fail(err instanceof Error ? err.message : 'Could not save the receipt.');
+  }
+
+  revalidatePath(`/groups/${groupId}`);
+  return { ok: true };
+}
+
+/* ------------------------------------------------------------------ people */
+
+export async function createPersonAction(
+  _prev: ActionResult | null,
+  formData: FormData
+): Promise<ActionResult> {
+  try {
+    pq.createPerson(String(formData.get('displayName') ?? ''), String(formData.get('email') ?? ''));
+  } catch (err) {
+    return fail(err instanceof Error ? err.message : 'Could not add that person.');
+  }
+  revalidatePath('/people');
+  return { ok: true };
+}
+
+export async function linkMemberAction(
+  _prev: ActionResult | null,
+  formData: FormData
+): Promise<ActionResult> {
+  const memberId = Number(formData.get('memberId'));
+  const raw = String(formData.get('personId') ?? '');
+  const personId = raw === '' ? null : Number(raw);
+
+  if (!Number.isFinite(memberId)) return fail('Unknown member.');
+  if (personId !== null && !Number.isFinite(personId)) return fail('Unknown person.');
+
+  try {
+    pq.linkMemberToPerson(memberId, personId);
+  } catch (err) {
+    return fail(err instanceof Error ? err.message : 'Could not link that member.');
+  }
+  revalidatePath('/people');
+  if (personId !== null) revalidatePath(`/people/${personId}`);
+  return { ok: true };
+}
+
+export async function mergePeopleAction(
+  _prev: ActionResult | null,
+  formData: FormData
+): Promise<ActionResult> {
+  const sourceId = Number(formData.get('sourceId'));
+  const targetId = Number(formData.get('targetId'));
+  try {
+    pq.mergePeople(sourceId, targetId);
+  } catch (err) {
+    return fail(err instanceof Error ? err.message : 'Could not merge those people.');
+  }
+  revalidatePath('/people');
+  return { ok: true };
+}
+
+export async function deletePersonAction(formData: FormData): Promise<void> {
+  const id = Number(formData.get('personId'));
+  if (Number.isFinite(id)) pq.deletePerson(id);
+  revalidatePath('/people');
+  redirect('/people');
 }

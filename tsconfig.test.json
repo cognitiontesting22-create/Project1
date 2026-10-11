@@ -1,0 +1,14 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "outDir": ".test-build",
+    "declaration": false,
+    "incremental": false,
+    "jsx": "react-jsx"
+  },
+  "include": ["lib/**/*.ts"],
+  "exclude": ["node_modules", "lib/queries.ts", "lib/scheduling-queries.ts", "lib/db.ts"]
+}

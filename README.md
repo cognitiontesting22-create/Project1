@@ -9,6 +9,7 @@ works out who owes whom and the fewest payments needed to square up.
 npm install
 npm run seed     # optional — loads three demo groups
 npm run dev      # http://localhost:3000
+npm test         # 27 cases over the money, schedule and receipt logic
 ```
 
 The SQLite file is created and migrated automatically at `data/splitter.db` on
@@ -32,6 +33,10 @@ first run (override with `DATABASE_PATH`). It's gitignored.
   months with optional interest and interest-free grace periods.
 - **Filter and export** — filter the ledger by date range, category, person,
   split type, currency, or origin, then download exactly those rows as CSV.
+- **Itemised receipts** — assign each line of a bill to whoever had it; tax and
+  tip follow in proportion to what each person ordered.
+- **People** — link per-group members to one person and see what they owe and
+  are owed across every group, with an itemised receipt of their charges.
 
 ## Layout
 
@@ -40,6 +45,7 @@ app/
   page.tsx              group list + hero
   groups/[id]/page.tsx  group detail
   rates/page.tsx        currency rate table
+  people/               directory and per-person rollup
   api/groups/[id]/export/route.ts   CSV download
   actions.ts            all server actions (validation lives at this boundary)
 components/             Avatar, Modal, Tabs, forms, lists, panels
@@ -55,9 +61,12 @@ lib/
   amortize.ts           instalment schedules
   schedule.ts           the month-anchor calendar rule
   filters.ts            one filter definition, shared by page and export
+  receipts.ts           itemised bill allocation
+  people.ts             cross-group rollup (pure + the SQL it runs)
   csv.ts                RFC 4180 writer with formula-injection guards
   dates.ts, types.ts
 scripts/seed.mjs        demo data
+tests/*.test.cjs        node:test suite, run with `npm test`
 ```
 
 ## Design notes
@@ -128,3 +137,29 @@ input — so risky cells get an apostrophe prefix. The trap is that negative
 numbers also start with `-`: a careless guard turns every balance into text that
 won't sum, so numeric-looking cells are left alone. Files carry a UTF-8 BOM and
 CRLF endings so Excel reads accents and emoji correctly.
+
+**Itemised bills reduce to exact splits.** `lib/receipts.ts` divides each line
+between the people who had it, then spreads tax and tip weighted by those
+subtotals — the person who ordered the steak carries more of the tax than the
+person who had soup. Largest-remainder is applied at *both* steps, so the
+per-person totals add up to the bill exactly. Multiplying each subtotal by a tax
+rate and rounding independently would leave the shares a cent or two off, and in
+this app that gap becomes a balance that can never be settled. The allocation is
+then written as ordinary `exact` splits, so balances need no knowledge of
+receipts.
+
+**A person is a separate record from a group member.** `members` stays
+per-group because it carries group-specific history; `people` is the identity
+those rows point at, which is what makes a cross-group total possible at all.
+The migration backfills one person per distinct name, and the people page
+surfaces anything still unlinked — unlinked members are invisible to the rollup,
+so that gap needs to be visible.
+
+**Cross-currency totals are the one indicative figure in the app.** Per-currency
+subtotals are exact. The single combined number can't be: it spans groups that
+were never converted to a common unit, so it uses today's rates and says so.
+
+**Tests** (`npm test`) cover the receipt allocator exhaustively — over a
+thousand principal/party/tax/tip combinations all reconcile to the penny — plus
+the cross-group rollup, run against a real throwaway SQLite database built from
+the actual migrations.
