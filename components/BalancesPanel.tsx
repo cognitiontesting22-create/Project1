@@ -3,7 +3,16 @@ import type { Balance, Debt, ExchangeRate, Member } from '@/lib/types';
 import Avatar from './Avatar';
 import SettleUpButton from './SettleUpButton';
 
-export function BalancesCard({ balances, currency }: { balances: Balance[]; currency: string }) {
+export function BalancesCard({
+  balances,
+  currency,
+  note,
+}: {
+  balances: Balance[];
+  currency: string;
+  /** Shown when the page is filtered, so these totals can't be misread. */
+  note?: string;
+}) {
   const maxAbs = Math.max(1, ...balances.map((b) => Math.abs(b.net_cents)));
 
   return (
@@ -12,6 +21,11 @@ export function BalancesCard({ balances, currency }: { balances: Balance[]; curr
       <p className="mb-4 text-xs text-slate-500">
         Positive means the group owes them; negative means they owe the group.
       </p>
+      {note && (
+        <p className="mb-4 rounded-lg border border-amber-500/20 bg-amber-500/[0.07] px-3 py-2 text-[11px] text-amber-300/90">
+          {note}
+        </p>
+      )}
 
       <ul className="space-y-3">
         {balances.map((b) => {
