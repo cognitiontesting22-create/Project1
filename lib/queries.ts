@@ -2,6 +2,13 @@ import 'server-only';
 import { BASE_CURRENCY, RATE_SCALE, convertMinorUnits, effectiveRateE8 } from './currency';
 import { db } from './db';
 import {
+  EMPTY_FILTERS,
+  expenseFilterSql,
+  settlementFilterSql,
+  whereOf,
+  type LedgerFilters,
+} from './filters';
+import {
   FULL_PERCENT_BP,
   formatBasisPoints,
   formatCents,
@@ -16,6 +23,7 @@ import type {
   Group,
   GroupSummary,
   Member,
+  RowSource,
   SettlementWithNames,
   SplitType,
 } from './types';
@@ -176,16 +184,35 @@ export function memberHasActivity(memberId: number): boolean {
 
 /* ---------------------------------------------------------------- expenses */
 
-export function listExpenses(groupId: number): ExpenseWithSplits[] {
+/**
+ * Where a row came from, so generated rows can be told apart from ones a
+ * person actually entered. Derived rather than stored, because the plan tables
+ * already hold the authoritative link.
+ */
+const SOURCE_SQL = `CASE
+    WHEN e.recurring_id IS NOT NULL THEN 'recurring'
+    WHEN e.id IN (SELECT interest_expense_id FROM plan_installments
+                   WHERE interest_expense_id IS NOT NULL) THEN 'plan'
+    ELSE 'manual' END`;
+
+export function listExpenses(
+  groupId: number,
+  filters: LedgerFilters = EMPTY_FILTERS
+): ExpenseWithSplits[] {
+  const fragment = expenseFilterSql(filters);
+
   const expenses = db
     .prepare(
-      `SELECT e.*, m.name AS paid_by_name
+      `SELECT e.*, m.name AS paid_by_name, ${SOURCE_SQL} AS source
          FROM expenses e
          JOIN members m ON m.id = e.paid_by
-        WHERE e.group_id = ?
+        WHERE ${whereOf(fragment, 'e.group_id = @groupId')}
         ORDER BY e.spent_at DESC, e.id DESC`
     )
-    .all(groupId) as (Expense & { paid_by_name: string })[];
+    .all({ ...fragment.params, groupId }) as (Expense & {
+    paid_by_name: string;
+    source: RowSource;
+  })[];
 
   if (expenses.length === 0) return [];
 
@@ -427,17 +454,25 @@ export function deleteExpense(id: number): void {
 
 /* ------------------------------------------------------------- settlements */
 
-export function listSettlements(groupId: number): SettlementWithNames[] {
+export function listSettlements(
+  groupId: number,
+  filters: LedgerFilters = EMPTY_FILTERS
+): SettlementWithNames[] {
+  const fragment = settlementFilterSql(filters);
+
   return db
     .prepare(
-      `SELECT s.*, f.name AS from_name, t.name AS to_name
+      `SELECT s.*, f.name AS from_name, t.name AS to_name,
+              CASE WHEN s.id IN (SELECT settlement_id FROM plan_installments
+                                  WHERE settlement_id IS NOT NULL)
+                   THEN 'plan' ELSE 'manual' END AS source
          FROM settlements s
          JOIN members f ON f.id = s.from_member_id
          JOIN members t ON t.id = s.to_member_id
-        WHERE s.group_id = ?
+        WHERE ${whereOf(fragment, 's.group_id = @groupId')}
         ORDER BY s.settled_at DESC, s.id DESC`
     )
-    .all(groupId) as SettlementWithNames[];
+    .all({ ...fragment.params, groupId }) as SettlementWithNames[];
 }
 
 export function createSettlement(input: {
@@ -491,10 +526,16 @@ export function deleteSettlement(id: number): void {
  * net = (what they fronted) - (their share of everything)
  *     + (cash they handed over)  - (cash they received)
  */
-export function getBalances(groupId: number): Balance[] {
-  return db
-    .prepare(
-      `SELECT m.id AS member_id,
+export function getBalances(groupId: number, asOf?: string): Balance[] {
+  // An as-of snapshot bounds expenses and settlements by the same date, which
+  // keeps the result summing to zero: each expense's payer credit and its
+  // splits are either both in, or both out.
+  //
+  // date() normalises the two storage shapes — a date-only spent_at from the
+  // form and a full datetime('now') timestamp — so a raw string comparison
+  // can't silently drop everything recorded today.
+  const bound = asOf ? 'AND date(%COL%) <= @asOf' : '';
+  const sql = `SELECT m.id AS member_id,
               m.name,
               COALESCE(paid.total, 0)                        AS paid_cents,
               COALESCE(owed.total, 0)                        AS owed_cents,
@@ -502,31 +543,54 @@ export function getBalances(groupId: number): Balance[] {
                 + COALESCE(sent.total, 0) - COALESCE(recv.total, 0) AS net_cents
          FROM members m
          LEFT JOIN (SELECT paid_by AS mid, SUM(amount_cents) AS total
-                      FROM expenses WHERE group_id = @gid GROUP BY paid_by) paid
+                      FROM expenses WHERE group_id = @gid ${bound.replace('%COL%', 'spent_at')}
+                      GROUP BY paid_by) paid
                 ON paid.mid = m.id
          LEFT JOIN (SELECT s.member_id AS mid, SUM(s.amount_cents) AS total
                       FROM expense_splits s
                       JOIN expenses e ON e.id = s.expense_id
-                     WHERE e.group_id = @gid GROUP BY s.member_id) owed
+                     WHERE e.group_id = @gid ${bound.replace('%COL%', 'e.spent_at')}
+                     GROUP BY s.member_id) owed
                 ON owed.mid = m.id
          LEFT JOIN (SELECT from_member_id AS mid, SUM(amount_cents) AS total
-                      FROM settlements WHERE group_id = @gid GROUP BY from_member_id) sent
+                      FROM settlements WHERE group_id = @gid ${bound.replace('%COL%', 'settled_at')}
+                      GROUP BY from_member_id) sent
                 ON sent.mid = m.id
          LEFT JOIN (SELECT to_member_id AS mid, SUM(amount_cents) AS total
-                      FROM settlements WHERE group_id = @gid GROUP BY to_member_id) recv
+                      FROM settlements WHERE group_id = @gid ${bound.replace('%COL%', 'settled_at')}
+                      GROUP BY to_member_id) recv
                 ON recv.mid = m.id
         WHERE m.group_id = @gid
-        ORDER BY net_cents DESC, m.id`
-    )
-    .all({ gid: groupId }) as Balance[];
+        ORDER BY net_cents DESC, m.id`;
+
+  return db.prepare(sql).all(
+    asOf ? { gid: groupId, asOf } : { gid: groupId }
+  ) as Balance[];
 }
 
-export function getCategoryTotals(groupId: number): { category: string; total_cents: number }[] {
+export function getCategoryTotals(
+  groupId: number,
+  filters: LedgerFilters = EMPTY_FILTERS
+): { category: string; total_cents: number }[] {
+  const fragment = expenseFilterSql(filters);
   return db
     .prepare(
-      `SELECT category, SUM(amount_cents) AS total_cents
-         FROM expenses WHERE group_id = ?
-        GROUP BY category ORDER BY total_cents DESC`
+      `SELECT e.category AS category, SUM(e.amount_cents) AS total_cents
+         FROM expenses e
+        WHERE ${whereOf(fragment, 'e.group_id = @groupId')}
+        GROUP BY e.category ORDER BY total_cents DESC`
     )
-    .all(groupId) as { category: string; total_cents: number }[];
+    .all({ ...fragment.params, groupId }) as { category: string; total_cents: number }[];
+}
+
+/** Currencies this group's expenses were actually entered in. */
+export function listUsedCurrencies(groupId: number): string[] {
+  const rows = db
+    .prepare(
+      `SELECT DISTINCT original_currency AS currency
+         FROM expenses WHERE group_id = ? AND original_currency IS NOT NULL
+        ORDER BY currency`
+    )
+    .all(groupId) as { currency: string }[];
+  return rows.map((r) => r.currency);
 }

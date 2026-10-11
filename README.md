@@ -30,6 +30,8 @@ first run (override with `DATABASE_PATH`). It's gitignored.
   each month, falling back to the last day in short months.
 - **Payment plans** — when someone can't settle in one go, spread a debt over
   months with optional interest and interest-free grace periods.
+- **Filter and export** — filter the ledger by date range, category, person,
+  split type, currency, or origin, then download exactly those rows as CSV.
 
 ## Layout
 
@@ -38,6 +40,7 @@ app/
   page.tsx              group list + hero
   groups/[id]/page.tsx  group detail
   rates/page.tsx        currency rate table
+  api/groups/[id]/export/route.ts   CSV download
   actions.ts            all server actions (validation lives at this boundary)
 components/             Avatar, Modal, Tabs, forms, lists, panels
 lib/
@@ -51,6 +54,8 @@ lib/
   balances.ts           debt simplification
   amortize.ts           instalment schedules
   schedule.ts           the month-anchor calendar rule
+  filters.ts            one filter definition, shared by page and export
+  csv.ts                RFC 4180 writer with formula-injection guards
   dates.ts, types.ts
 scripts/seed.mjs        demo data
 ```
@@ -103,3 +108,23 @@ creditor and split onto the debtor. The net effect is exactly the principal
 portion, so the balance query doesn't need to know plans exist and the zero-sum
 invariant holds for free. Interest is charged on the declining balance and the
 final instalment absorbs the rounding, so principal lands on exactly zero.
+
+**Export is filtered by the same code the page is.** `lib/filters.ts` parses one
+filter object out of the URL, and both the group page and the CSV route use it,
+so a download can never be a different set of rows than the one on screen.
+Malformed parameters return a 400 rather than being ignored — silently dropping
+a bad `from=` would hand back the whole ledger when you asked for one month.
+
+**Exported balances are a point-in-time snapshot**, labelled with an `as_of`
+column, and still sum to exactly zero because expenses and settlements are
+bounded by the same date. On screen, balances and settle-up deliberately stay
+*current* even when the ledger is filtered, with a note saying so — showing
+March's debts beside a "Record payment" button would invite someone to pay a
+number that stopped being true months ago.
+
+**The CSV writer defends against two things.** Excel and Sheets execute any cell
+beginning `=`, `+`, `-`, or `@`, and descriptions and member names are user
+input — so risky cells get an apostrophe prefix. The trap is that negative
+numbers also start with `-`: a careless guard turns every balance into text that
+won't sum, so numeric-looking cells are left alone. Files carry a UTF-8 BOM and
+CRLF endings so Excel reads accents and emoji correctly.

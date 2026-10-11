@@ -5,6 +5,7 @@ import AddExpenseButton from '@/components/AddExpenseButton';
 import { AvatarStack } from '@/components/Avatar';
 import { BalancesCard, SettleUpCard } from '@/components/BalancesPanel';
 import ExpenseList from '@/components/ExpenseList';
+import FilterBar from '@/components/FilterBar';
 import MembersPanel from '@/components/MembersPanel';
 import PlansPanel from '@/components/PlansPanel';
 import RecurringPanel from '@/components/RecurringPanel';
@@ -21,14 +22,24 @@ import {
   listMembers,
   listRates,
   listSettlements,
+  listUsedCurrencies,
 } from '@/lib/queries';
+import { filtersFromSearchParams, hasFilters } from '@/lib/filters';
 import { listPlans, listRecurring, postDueItems } from '@/lib/scheduling-queries';
 import { categoryMeta } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
 
-export default async function GroupPage({ params }: { params: Promise<{ id: string }> }) {
+export default async function GroupPage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ id: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
   const { id } = await params;
+  const filters = filtersFromSearchParams(await searchParams);
+  const filtered = hasFilters(filters);
   const groupId = Number(id);
   if (!Number.isInteger(groupId)) notFound();
 
@@ -40,12 +51,18 @@ export default async function GroupPage({ params }: { params: Promise<{ id: stri
   postDueItems(groupId);
 
   const members = listMembers(groupId);
-  const expenses = listExpenses(groupId);
-  const settlements = listSettlements(groupId);
+  const expenses = listExpenses(groupId, filters);
+  const settlements = listSettlements(groupId, filters);
+
+  // Balances and settle-up stay current on purpose, even while the ledger below
+  // is filtered. Showing March's debts next to a "Record" button would invite
+  // someone to pay a number that stopped being true months ago. The CSV export
+  // does offer a point-in-time snapshot, clearly labelled with its as-of date.
   const balances = getBalances(groupId);
   const debts = simplifyDebts(balances);
-  const categories = getCategoryTotals(groupId);
+  const categories = getCategoryTotals(groupId, filters);
   const rates = listRates();
+  const usedCurrencies = listUsedCurrencies(groupId);
   const recurring = listRecurring(groupId);
   const plans = listPlans(groupId);
 
@@ -131,8 +148,18 @@ export default async function GroupPage({ params }: { params: Promise<{ id: stri
         </div>
       ) : (
         <>
+          <FilterBar
+            groupId={groupId}
+            members={members}
+            currencies={usedCurrencies}
+            resultCount={expenses.length}
+          />
+
           <section className="grid gap-4 sm:grid-cols-3">
-            <Stat label="Total spent" value={formatCents(totalSpent, group.currency)} />
+            <Stat
+              label={filtered ? 'Total spent (filtered)' : 'Total spent'}
+              value={formatCents(totalSpent, group.currency)}
+            />
             <Stat
               label="Still owed"
               value={formatCents(outstanding, group.currency)}
@@ -185,7 +212,11 @@ export default async function GroupPage({ params }: { params: Promise<{ id: stri
                 currency={group.currency}
                 rates={rates}
               />
-              <BalancesCard balances={balances} currency={group.currency} />
+              <BalancesCard
+                balances={balances}
+                currency={group.currency}
+                note={filtered ? 'Current totals — filters apply to the ledger, not here.' : undefined}
+              />
 
               <RecurringPanel
                 groupId={groupId}
