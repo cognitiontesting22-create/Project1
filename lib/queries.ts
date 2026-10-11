@@ -23,6 +23,8 @@ import type {
   Group,
   GroupSummary,
   Member,
+  ReceiptDetail,
+  ReceiptItemRow,
   RowSource,
   SettlementWithNames,
   SplitType,
@@ -217,7 +219,8 @@ export function listExpenses(
   if (expenses.length === 0) return [];
 
   const splitStmt = db.prepare(
-    `SELECT s.member_id, s.amount_cents, s.weight, m.name
+    `SELECT s.member_id, s.amount_cents, s.weight,
+            s.items_cents, s.tax_cents, s.tip_cents, m.name
        FROM expense_splits s
        JOIN members m ON m.id = s.member_id
       WHERE s.expense_id = ?
@@ -258,6 +261,18 @@ export type ExpenseInput = {
   recurringId?: number;
   /** The schedule period this expense covers, e.g. "2026-02". */
   period?: string;
+  /** Per-member items/tax/tip breakdown, stored alongside each split row. */
+  receiptBreakdown?: Record<number, { items_cents: number; tax_cents: number; tip_cents: number }>;
+  /** The itemisation itself, when this expense is a receipt. */
+  receipt?: {
+    taxCents: number;
+    tipCents: number;
+    items: {
+      description: string;
+      amountCents: number;
+      shares: { member_id: number; amount_cents: number }[];
+    }[];
+  };
 };
 
 export type ComputedSplit = { member_id: number; amount_cents: number; weight: number | null };
@@ -309,6 +324,10 @@ export function computeSplits(input: ExpenseInput): ComputedSplit[] {
       break;
     }
 
+    // A receipt arrives already allocated by lib/receipts.ts, which has done
+    // the item assignment and the proportional tax/tip spread. The per-person
+    // totals are therefore exact amounts, validated the same way.
+    case 'items':
     case 'exact': {
       const amounts = participants.map((id) => values[id] ?? NaN);
       assertCleanValues(amounts, 'an amount', 'Amounts');
@@ -439,9 +458,40 @@ export function createExpense(input: ExpenseInput): number {
     const expenseId = Number(info.lastInsertRowid);
 
     const insertSplit = db.prepare(
-      'INSERT INTO expense_splits (expense_id, member_id, amount_cents, weight) VALUES (?, ?, ?, ?)'
+      `INSERT INTO expense_splits
+         (expense_id, member_id, amount_cents, weight, items_cents, tax_cents, tip_cents)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
     );
-    for (const s of splits) insertSplit.run(expenseId, s.member_id, s.amount_cents, s.weight);
+    const breakdown = input.receiptBreakdown ?? {};
+    for (const s of splits) {
+      const b = breakdown[s.member_id];
+      insertSplit.run(
+        expenseId, s.member_id, s.amount_cents, s.weight,
+        b?.items_cents ?? null, b?.tax_cents ?? null, b?.tip_cents ?? null
+      );
+    }
+
+    if (input.receipt) {
+      db.prepare('INSERT INTO receipts (expense_id, tax_cents, tip_cents) VALUES (?, ?, ?)')
+        .run(expenseId, input.receipt.taxCents, input.receipt.tipCents);
+
+      const insertItem = db.prepare(
+        'INSERT INTO receipt_items (expense_id, position, description, amount_cents) VALUES (?, ?, ?, ?)'
+      );
+      const insertShare = db.prepare(
+        'INSERT INTO receipt_item_shares (item_id, member_id, amount_cents) VALUES (?, ?, ?)'
+      );
+
+      input.receipt.items.forEach((item, index) => {
+        const itemId = Number(
+          insertItem.run(expenseId, index, item.description, item.amountCents).lastInsertRowid
+        );
+        for (const share of item.shares) {
+          insertShare.run(itemId, share.member_id, share.amount_cents);
+        }
+      });
+    }
+
     return expenseId;
   });
 
@@ -593,4 +643,80 @@ export function listUsedCurrencies(groupId: number): string[] {
     )
     .all(groupId) as { currency: string }[];
   return rows.map((r) => r.currency);
+}
+
+/* ----------------------------------------------------------- receipts */
+
+export function getReceipt(expenseId: number): ReceiptDetail | undefined {
+  const head = db
+    .prepare('SELECT * FROM receipts WHERE expense_id = ?')
+    .get(expenseId) as { expense_id: number; tax_cents: number; tip_cents: number } | undefined;
+  if (!head) return undefined;
+
+  const items = db
+    .prepare('SELECT * FROM receipt_items WHERE expense_id = ? ORDER BY position, id')
+    .all(expenseId) as Omit<ReceiptItemRow, 'shares'>[];
+
+  const shareStmt = db.prepare(
+    `SELECT s.member_id, s.amount_cents, m.name
+       FROM receipt_item_shares s JOIN members m ON m.id = s.member_id
+      WHERE s.item_id = ? ORDER BY m.id`
+  );
+
+  return {
+    expense_id: head.expense_id,
+    tax_cents: head.tax_cents,
+    tip_cents: head.tip_cents,
+    items: items.map((i) => ({ ...i, shares: shareStmt.all(i.id) as ReceiptItemRow['shares'] })),
+  };
+}
+
+/** Every expense a member has a share of, with receipt detail where it exists. */
+export function getMemberStatement(memberId: number) {
+  const rows = db
+    .prepare(
+      `SELECT e.id, e.description, e.spent_at, e.category, e.split_type, e.amount_cents AS expense_total,
+              s.amount_cents, s.items_cents, s.tax_cents, s.tip_cents,
+              g.currency, g.name AS group_name, g.id AS group_id, p.name AS paid_by_name,
+              (e.paid_by = s.member_id) AS paid_it
+         FROM expense_splits s
+         JOIN expenses e ON e.id = s.expense_id
+         JOIN groups g ON g.id = e.group_id
+         JOIN members p ON p.id = e.paid_by
+        WHERE s.member_id = ?
+        ORDER BY e.spent_at DESC, e.id DESC`
+    )
+    .all(memberId) as {
+    id: number;
+    description: string;
+    spent_at: string;
+    category: string;
+    split_type: SplitType;
+    expense_total: number;
+    amount_cents: number;
+    items_cents: number | null;
+    tax_cents: number | null;
+    tip_cents: number | null;
+    currency: string;
+    group_name: string;
+    group_id: number;
+    paid_by_name: string;
+    paid_it: number;
+  }[];
+
+  const itemStmt = db.prepare(
+    `SELECT i.description, sh.amount_cents
+       FROM receipt_item_shares sh
+       JOIN receipt_items i ON i.id = sh.item_id
+      WHERE i.expense_id = ? AND sh.member_id = ?
+      ORDER BY i.position, i.id`
+  );
+
+  return rows.map((r) => ({
+    ...r,
+    items:
+      r.split_type === 'items'
+        ? (itemStmt.all(r.id, memberId) as { description: string; amount_cents: number }[])
+        : [],
+  }));
 }

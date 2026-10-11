@@ -8,6 +8,7 @@ import ExpenseList from '@/components/ExpenseList';
 import FilterBar from '@/components/FilterBar';
 import MembersPanel from '@/components/MembersPanel';
 import PlansPanel from '@/components/PlansPanel';
+import ReceiptBuilder from '@/components/ReceiptBuilder';
 import RecurringPanel from '@/components/RecurringPanel';
 import SettlementList from '@/components/SettlementList';
 import SettleUpButton from '@/components/SettleUpButton';
@@ -117,6 +118,14 @@ export default async function GroupPage({
                   currency={group.currency}
                   rates={rates}
                 />
+                {members.length > 1 && (
+                  <ReceiptBuilder
+                    groupId={groupId}
+                    members={members}
+                    currency={group.currency}
+                    rates={rates}
+                  />
+                )}
                 {members.length > 1 && (
                   <SettleUpButton
                     groupId={groupId}
