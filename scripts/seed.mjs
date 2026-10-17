@@ -271,7 +271,22 @@ const extras = db.transaction(() => {
   }
   if (balance !== 0) throw new Error(`seeded plan left ${balance} outstanding`);
 
+  // Standing budgets from the same month as the rent, plus a tighter food
+  // budget from this month so the card shows a change taking effect. Food
+  // goes over once pizza night lands in the current month.
+  const budgetMonth = startDate.slice(0, 7);
+  const now = new Date();
+  const thisMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  const insertBudget = db.prepare(
+    `INSERT INTO budgets (group_id, category, amount_cents, effective_from) VALUES (?, ?, ?, ?)
+     ON CONFLICT (group_id, category, effective_from) DO UPDATE SET amount_cents = excluded.amount_cents`
+  );
+  insertBudget.run(flat.id, 'rent', 450000, budgetMonth);
+  insertBudget.run(flat.id, 'food', 15000, budgetMonth);
+  insertBudget.run(flat.id, 'food', 5000, thisMonth);
+
   console.log('seeded 🔁 recurring rent + 💳 a 6-month payment plan in Apartment 4B');
+  console.log('   + 📊 rent and food budgets');
   console.log('   (open the group and the overdue months post themselves)');
 });
 extras();
