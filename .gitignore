@@ -10,3 +10,4 @@ data/*.db-shm
 .env*.local
 next-env.d.ts
 tsconfig.tsbuildinfo
+.test-build

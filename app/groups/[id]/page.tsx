@@ -4,6 +4,7 @@ import { deleteGroupAction } from '@/app/actions';
 import AddExpenseButton from '@/components/AddExpenseButton';
 import { AvatarStack } from '@/components/Avatar';
 import { BalancesCard, SettleUpCard } from '@/components/BalancesPanel';
+import BudgetsPanel from '@/components/BudgetsPanel';
 import ExpenseList from '@/components/ExpenseList';
 import FilterBar from '@/components/FilterBar';
 import MembersPanel from '@/components/MembersPanel';
@@ -13,6 +14,8 @@ import SettlementList from '@/components/SettlementList';
 import SettleUpButton from '@/components/SettleUpButton';
 import Tabs from '@/components/Tabs';
 import { outstandingCents, simplifyDebts } from '@/lib/balances';
+import { getBudgetReport } from '@/lib/budget-queries';
+import { currentMonth, isEditableMonth, isMonth } from '@/lib/budgets';
 import { formatCents } from '@/lib/money';
 import {
   getBalances,
@@ -38,7 +41,8 @@ export default async function GroupPage({
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const { id } = await params;
-  const filters = filtersFromSearchParams(await searchParams);
+  const query = await searchParams;
+  const filters = filtersFromSearchParams(query);
   const filtered = hasFilters(filters);
   const groupId = Number(id);
   if (!Number.isInteger(groupId)) notFound();
@@ -65,6 +69,13 @@ export default async function GroupPage({
   const usedCurrencies = listUsedCurrencies(groupId);
   const recurring = listRecurring(groupId);
   const plans = listPlans(groupId);
+
+  // Budgets ignore ledger filters, like balances: a budget is about the whole
+  // month. A malformed ?month= just falls back to this month.
+  const thisMonth = currentMonth();
+  const budgetMonth =
+    typeof query.month === 'string' && isMonth(query.month) ? query.month : thisMonth;
+  const budgets = getBudgetReport(groupId, budgetMonth);
 
   const totalSpent = expenses.reduce((sum, e) => sum + e.amount_cents, 0);
   const outstanding = outstandingCents(balances);
@@ -216,6 +227,14 @@ export default async function GroupPage({
                 balances={balances}
                 currency={group.currency}
                 note={filtered ? 'Current totals — filters apply to the ledger, not here.' : undefined}
+              />
+              <BudgetsPanel
+                groupId={groupId}
+                currency={group.currency}
+                report={budgets}
+                thisMonth={thisMonth}
+                editable={isEditableMonth(budgetMonth, thisMonth)}
+                note={filtered ? 'Whole-month totals — filters apply to the ledger, not here.' : undefined}
               />
 
               <RecurringPanel

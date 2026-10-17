@@ -51,7 +51,13 @@ export default function FilterBar({
       next.forEach((v) => p.append(key, v));
     });
 
-  const clearAll = () => router.replace(pathname, { scroll: false });
+  // The budget month isn't a ledger filter, so clearing filters keeps it.
+  const clearAll = () => {
+    const month = searchParams.get('month');
+    router.replace(month ? `${pathname}?month=${encodeURIComponent(month)}` : pathname, {
+      scroll: false,
+    });
+  };
 
   const chip = (active: boolean) =>
     `chip transition ${

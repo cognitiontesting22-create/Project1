@@ -9,6 +9,7 @@ works out who owes whom and the fewest payments needed to square up.
 npm install
 npm run seed     # optional — loads three demo groups
 npm run dev      # http://localhost:3000
+npm test         # budget month, status and query logic
 ```
 
 The SQLite file is created and migrated automatically at `data/splitter.db` on
@@ -32,6 +33,9 @@ first run (override with `DATABASE_PATH`). It's gitignored.
   months with optional interest and interest-free grace periods.
 - **Filter and export** — filter the ledger by date range, category, person,
   split type, currency, or origin, then download exactly those rows as CSV.
+- **Budgets** — a monthly limit per category, set once and carried forward.
+  The group page shows each category's spend against it for any month, and
+  `GET /api/groups/:id/budgets?month=YYYY-MM` returns the same figures as JSON.
 
 ## Layout
 
@@ -41,6 +45,7 @@ app/
   groups/[id]/page.tsx  group detail
   rates/page.tsx        currency rate table
   api/groups/[id]/export/route.ts   CSV download
+  api/groups/[id]/budgets/route.ts  budget status as JSON
   actions.ts            all server actions (validation lives at this boundary)
 components/             Avatar, Modal, Tabs, forms, lists, panels
 lib/
@@ -55,9 +60,11 @@ lib/
   amortize.ts           instalment schedules
   schedule.ts           the month-anchor calendar rule
   filters.ts            one filter definition, shared by page and export
+  budgets.ts            budget status math (pure + the SQL it runs)
   csv.ts                RFC 4180 writer with formula-injection guards
   dates.ts, types.ts
 scripts/seed.mjs        demo data
+tests/*.test.cjs        node:test suite, run with `npm test`
 ```
 
 ## Design notes
@@ -128,3 +135,22 @@ input — so risky cells get an apostrophe prefix. The trap is that negative
 numbers also start with `-`: a careless guard turns every balance into text that
 won't sum, so numeric-looking cells are left alone. Files carry a UTF-8 BOM and
 CRLF endings so Excel reads accents and emoji correctly.
+
+**A budget carries forward until it's replaced.** Each row says "from this
+month on", and the budget for a month is the latest row on or before it — so
+lowering next month's food budget leaves October measured against October's
+number. Removing a budget writes an empty row rather than deleting history.
+Only the current month and later can be changed; past months are read-only.
+
+**Budgets count what the group bought.** Spend is every expense dated in the
+month, in the group's currency, recurring rent included. Payment-plan interest
+is posted as an expense so balances work, but it's the price of a loan between
+members, so it's left out — as are settlements, which move money already spent.
+Recurring charges count once they post, so early in a month "under" means
+"under so far". The JSON route posts due items first, exactly as the page does,
+so the two never disagree. Amounts are integer minor units and the percentage
+is basis points; "near" starts at 80% and "over" means strictly above 100%.
+
+**Tests** (`npm test`) cover the budget month helpers and status math, plus the
+budget queries run against a real throwaway SQLite database built from the
+actual migrations.

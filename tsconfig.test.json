@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "outDir": ".test-build",
+    "declaration": false,
+    "incremental": false
+  },
+  "include": ["lib/budgets.ts"]
+}

@@ -2,6 +2,8 @@
 
 import { revalidatePath } from 'next/cache';
 import { redirect } from 'next/navigation';
+import * as bq from '@/lib/budget-queries';
+import { isBudgetCategory, isEditableMonth, isMonth } from '@/lib/budgets';
 import { rateFromInput } from '@/lib/currency';
 import { toBasisPoints, toCents } from '@/lib/money';
 import * as q from '@/lib/queries';
@@ -370,4 +372,50 @@ export async function deletePlanAction(formData: FormData): Promise<void> {
     // A plan with posted instalments can only be cancelled; ignore and re-render.
   }
   revalidatePath(`/groups/${groupId}`);
+}
+
+/* ----------------------------------------------------------------- budgets */
+
+/** The fields both budget actions share, or the reason they're unusable. */
+function readBudgetTarget(
+  formData: FormData
+): { groupId: number; category: string; month: string } | { error: string } {
+  const groupId = Number(formData.get('groupId'));
+  const category = String(formData.get('category') ?? '');
+  const month = String(formData.get('month') ?? '');
+
+  if (!q.getGroup(groupId)) return { error: 'That group no longer exists.' };
+  if (!isBudgetCategory(category)) return { error: 'Pick a category.' };
+  if (!isMonth(month)) return { error: 'Pick a month.' };
+  if (!isEditableMonth(month)) {
+    return { error: 'Past months keep the budget they had — pick this month or a later one.' };
+  }
+  return { groupId, category, month };
+}
+
+export async function setBudgetAction(
+  _prev: ActionResult | null,
+  formData: FormData
+): Promise<ActionResult> {
+  const target = readBudgetTarget(formData);
+  if ('error' in target) return fail(target.error);
+
+  const amountCents = toCents(String(formData.get('amount') ?? ''));
+  if (!Number.isFinite(amountCents) || amountCents < 0) return fail('Enter an amount of zero or more.');
+
+  bq.setBudget(target.groupId, target.category, target.month, amountCents);
+  revalidatePath(`/groups/${target.groupId}`);
+  return { ok: true };
+}
+
+export async function clearBudgetAction(
+  _prev: ActionResult | null,
+  formData: FormData
+): Promise<ActionResult> {
+  const target = readBudgetTarget(formData);
+  if ('error' in target) return fail(target.error);
+
+  bq.setBudget(target.groupId, target.category, target.month, null);
+  revalidatePath(`/groups/${target.groupId}`);
+  return { ok: true };
 }
