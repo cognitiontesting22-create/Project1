@@ -1,15 +1,20 @@
 'use server';
 
 import { revalidatePath } from 'next/cache';
+import { cookies } from 'next/headers';
 import { redirect } from 'next/navigation';
+import { actorCookieName } from '@/lib/activity';
+import { currentActorId } from '@/lib/actor';
+import { UndoRefused, undoActivity } from '@/lib/undo';
 import * as bq from '@/lib/budget-queries';
 import { isBudgetCategory, isEditableMonth, isMonth } from '@/lib/budgets';
 import { rateFromInput } from '@/lib/currency';
+import { expenseFieldsFromForm, expenseInputFrom } from '@/lib/expense-input';
 import { toBasisPoints, toCents } from '@/lib/money';
 import * as q from '@/lib/queries';
 import * as sq from '@/lib/scheduling-queries';
 import { today as todayISO } from '@/lib/schedule';
-import { isSplitType, type SplitType } from '@/lib/types';
+import { isSplitType } from '@/lib/types';
 
 export type ActionResult = { ok: true } | { ok: false; error: string };
 
@@ -90,69 +95,76 @@ export async function removeMemberAction(
   return { ok: true };
 }
 
+/* ---------------------------------------------------------------- acting as */
+
+/** Who later changes in this group are credited to. A year-long cookie per group. */
+export async function setActorAction(formData: FormData): Promise<void> {
+  const groupId = Number(formData.get('groupId'));
+  const memberId = Number(formData.get('memberId'));
+  if (!Number.isInteger(groupId) || !q.listMembers(groupId).some((m) => m.id === memberId)) return;
+
+  (await cookies()).set(actorCookieName(groupId), String(memberId), {
+    path: '/',
+    maxAge: 60 * 60 * 24 * 365,
+    sameSite: 'lax',
+  });
+  revalidatePath(`/groups/${groupId}`);
+}
+
 /* ---------------------------------------------------------------- expenses */
+
+/** The expense form, as create and edit both submit it. */
+function readExpenseForm(formData: FormData) {
+  const groupId = Number(formData.get('groupId'));
+  const fields = expenseFieldsFromForm(formData);
+  return { groupId, ...expenseInputFrom(groupId, q.getGroup(groupId), fields) };
+}
 
 export async function createExpenseAction(
   _prev: ActionResult | null,
   formData: FormData
 ): Promise<ActionResult> {
-  const groupId = Number(formData.get('groupId'));
-  const description = String(formData.get('description') ?? '').trim();
-  const amountCents = toCents(String(formData.get('amount') ?? ''));
-  const paidBy = Number(formData.get('paidBy'));
-  const rawSplitType = String(formData.get('splitType') ?? 'equal');
-
-  if (!description) return fail('What was this expense for?');
-  if (!Number.isFinite(amountCents) || amountCents <= 0) return fail('Enter an amount above zero.');
-  if (!Number.isFinite(paidBy)) return fail('Pick who paid.');
-  if (!isSplitType(rawSplitType)) return fail('Pick how to split this expense.');
-
-  const group = q.getGroup(groupId);
-  if (!group) return fail('That group no longer exists.');
-
-  const splitType: SplitType = rawSplitType;
-  const participants = formData
-    .getAll('participants')
-    .map((v) => Number(v))
-    .filter((n) => Number.isFinite(n));
-
-  if (participants.length === 0) return fail('Select at least one person to split between.');
-
-  // Each mode has its own integer unit: cents, basis points, or centishares.
-  // `equal` needs no per-person input at all.
-  const values: Record<number, number> = {};
-  if (splitType !== 'equal') {
-    const parse = splitType === 'exact' ? toCents : toBasisPoints;
-    for (const id of participants) {
-      values[id] = parse(String(formData.get(`value_${id}`) ?? ''));
-    }
-  }
+  const parsed = readExpenseForm(formData);
+  if ('error' in parsed) return fail(parsed.error);
 
   try {
-    q.createExpense({
-      groupId,
-      description,
-      amountCents,
-      paidBy,
-      category: String(formData.get('category') ?? 'general'),
-      splitType,
-      spentAt: String(formData.get('spentAt') ?? '') || undefined,
-      participants,
-      values,
-      currency: String(formData.get('currency') ?? '') || group.currency,
+    q.createExpense({ ...parsed.input, actorId: await currentActorId(parsed.groupId) });
+  } catch (err) {
+    return fail(err instanceof Error ? err.message : 'Could not save the expense.');
+  }
+
+  revalidatePath(`/groups/${parsed.groupId}`);
+  return { ok: true };
+}
+
+export async function updateExpenseAction(
+  _prev: ActionResult | null,
+  formData: FormData
+): Promise<ActionResult> {
+  const expenseId = Number(formData.get('expenseId'));
+  if (!Number.isInteger(expenseId)) return fail('Unknown expense.');
+  if (q.expenseSource(expenseId) === 'plan') return fail(q.PLAN_LOCKED_MESSAGE);
+
+  const parsed = readExpenseForm(formData);
+  if ('error' in parsed) return fail(parsed.error);
+
+  try {
+    q.updateExpense(expenseId, {
+      ...parsed.input,
+      actorId: await currentActorId(parsed.groupId),
     });
   } catch (err) {
     return fail(err instanceof Error ? err.message : 'Could not save the expense.');
   }
 
-  revalidatePath(`/groups/${groupId}`);
+  revalidatePath(`/groups/${parsed.groupId}`);
   return { ok: true };
 }
 
 export async function deleteExpenseAction(formData: FormData): Promise<void> {
   const groupId = Number(formData.get('groupId'));
   const id = Number(formData.get('expenseId'));
-  if (Number.isFinite(id)) q.deleteExpense(id);
+  if (Number.isFinite(id)) q.deleteExpense(id, await currentActorId(groupId));
   revalidatePath(`/groups/${groupId}`);
 }
 
@@ -181,6 +193,7 @@ export async function createSettlementAction(
       amountCents,
       currency: String(formData.get('currency') ?? '') || undefined,
       note: String(formData.get('note') ?? ''),
+      actorId: await currentActorId(groupId),
     });
   } catch (err) {
     return fail(err instanceof Error ? err.message : 'Could not record the payment.');
@@ -227,7 +240,7 @@ export async function deleteRateAction(
 export async function deleteSettlementAction(formData: FormData): Promise<void> {
   const groupId = Number(formData.get('groupId'));
   const id = Number(formData.get('settlementId'));
-  if (Number.isFinite(id)) q.deleteSettlement(id);
+  if (Number.isFinite(id)) q.deleteSettlement(id, await currentActorId(groupId));
   revalidatePath(`/groups/${groupId}`);
 }
 
@@ -417,5 +430,30 @@ export async function clearBudgetAction(
 
   bq.setBudget(target.groupId, target.category, target.month, null);
   revalidatePath(`/groups/${target.groupId}`);
+  return { ok: true };
+}
+
+/* ---------------------------------------------------------------- activity */
+
+/**
+ * Undo from the Activity tab. Every check runs again here, so a stale page
+ * gets the refusal message back instead of a silent no-op.
+ */
+export async function undoActivityAction(
+  _prev: ActionResult | null,
+  formData: FormData
+): Promise<ActionResult> {
+  const groupId = Number(formData.get('groupId'));
+  const entryId = Number(formData.get('entryId'));
+  if (!Number.isInteger(groupId) || !Number.isInteger(entryId)) return fail('Unknown activity entry.');
+
+  try {
+    undoActivity(groupId, entryId, await currentActorId(groupId));
+  } catch (err) {
+    if (err instanceof UndoRefused) return fail(err.message);
+    throw err;
+  }
+
+  revalidatePath(`/groups/${groupId}`);
   return { ok: true };
 }

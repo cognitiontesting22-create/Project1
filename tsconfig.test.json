@@ -8,5 +8,13 @@
     "declaration": false,
     "incremental": false
   },
-  "include": ["lib/budgets.ts"]
+  "include": [
+    "lib/budgets.ts",
+    "lib/activity.ts",
+    "lib/expense-input.ts",
+    "lib/queries.ts",
+    "lib/scheduling-queries.ts",
+    "lib/budget-queries.ts",
+    "lib/undo.ts"
+  ]
 }

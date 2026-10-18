@@ -1,5 +1,26 @@
 import 'server-only';
-import { BASE_CURRENCY, RATE_SCALE, convertMinorUnits, effectiveRateE8 } from './currency';
+import {
+  changedFields,
+  expenseCreatedSummary,
+  expenseDeletedSummary,
+  expenseEditedSummary,
+  settlementSummary,
+  type ExpenseSnapshot,
+} from './activity';
+import {
+  actorName,
+  logActivity,
+  memberName,
+  snapshotExpense,
+  snapshotSettlement,
+} from './activity-queries';
+import {
+  BASE_CURRENCY,
+  RATE_SCALE,
+  applyRateE8,
+  convertMinorUnits,
+  effectiveRateE8,
+} from './currency';
 import { db } from './db';
 import {
   EMPTY_FILTERS,
@@ -258,6 +279,8 @@ export type ExpenseInput = {
   recurringId?: number;
   /** The schedule period this expense covers, e.g. "2026-02". */
   period?: string;
+  /** The acting-as member the activity log credits. Omitted or null: Tally posted it. */
+  actorId?: number | null;
 };
 
 export type ComputedSplit = { member_id: number; amount_cents: number; weight: number | null };
@@ -442,14 +465,215 @@ export function createExpense(input: ExpenseInput): number {
       'INSERT INTO expense_splits (expense_id, member_id, amount_cents, weight) VALUES (?, ?, ?, ?)'
     );
     for (const s of splits) insertSplit.run(expenseId, s.member_id, s.amount_cents, s.weight);
+
+    const after = snapshotExpense(expenseId)!;
+    const actor = actorName(input.groupId, input.actorId);
+    logActivity({
+      groupId: input.groupId,
+      kind: 'expense_created',
+      actorId: input.actorId ?? null,
+      actorName: actor,
+      summary: expenseCreatedSummary(
+        actor,
+        after.expense.description,
+        after.expense.amount_cents,
+        group.currency
+      ),
+      amountBefore: null,
+      amountAfter: after.expense.amount_cents,
+      expenseId,
+      after,
+    });
     return expenseId;
   });
 
   return tx();
 }
 
-export function deleteExpense(id: number): void {
-  db.prepare('DELETE FROM expenses WHERE id = ?').run(id);
+export function getExpense(groupId: number, id: number): Expense | undefined {
+  return db
+    .prepare('SELECT * FROM expenses WHERE id = ? AND group_id = ?')
+    .get(id, groupId) as Expense | undefined;
+}
+
+/** Interest a payment plan posted: part of terms someone agreed to, so not editable. */
+export const PLAN_LOCKED_MESSAGE = "Payment plan instalments can't be edited.";
+
+/** An edit refused because of what the expense is, not what was typed (a 409 over HTTP). */
+export class ExpenseLocked extends Error {}
+
+/** Where an expense came from, by the same SOURCE_SQL the ledger and the export use. */
+export function expenseSource(id: number): RowSource | undefined {
+  const row = db.prepare(`SELECT ${SOURCE_SQL} AS source FROM expenses e WHERE e.id = ?`).get(id) as
+    | { source: RowSource }
+    | undefined;
+  return row?.source;
+}
+
+export type UpdateResult = {
+  /** The booked amount in the group's currency. */
+  amountCents: number;
+  /** True when the edit turned a recurring posting into a one-off. */
+  detached: boolean;
+};
+
+/**
+ * Rewrites every field of an existing expense in place, keeping its id and
+ * created_at. Validation is exactly createExpense's, and it all runs before the
+ * transaction opens, so a rejected edit leaves the old row and splits untouched.
+ * An edit that changes nothing writes nothing, not even a log entry.
+ *
+ * The expense keeps the rate it was booked at unless the currency itself
+ * changes: editing the rate table never moves an existing expense. Editing a
+ * recurring posting detaches it, and its period is never posted again.
+ * Plan interest can't be edited at all (ExpenseLocked).
+ */
+export function updateExpense(expenseId: number, input: ExpenseInput): UpdateResult {
+  const before = snapshotExpense(expenseId);
+  if (!before || before.expense.group_id !== input.groupId) throw new Error('Unknown expense.');
+  if (expenseSource(expenseId) === 'plan') throw new ExpenseLocked(PLAN_LOCKED_MESSAGE);
+  const old = before.expense;
+
+  assertMembersInGroup(input.groupId, [input.paidBy, ...input.participants]);
+
+  const group = getGroup(input.groupId);
+  if (!group) throw new Error('That group no longer exists.');
+
+  const entryCurrency = input.currency ?? group.currency;
+  let booked: Pick<Expense, 'amount_cents' | 'original_amount_cents' | 'original_currency' | 'rate_e8'>;
+  if (entryCurrency !== old.original_currency) {
+    // A new currency is converted fresh, exactly like a new expense.
+    booked = book(input.amountCents, entryCurrency, group.currency);
+  } else if (input.amountCents === old.original_amount_cents) {
+    // Same amount, same currency: the booked figure stays exactly as it was.
+    booked = {
+      amount_cents: old.amount_cents,
+      original_amount_cents: old.original_amount_cents,
+      original_currency: old.original_currency,
+      rate_e8: old.rate_e8,
+    };
+  } else {
+    // Same currency, new amount: at the rate this expense was booked at.
+    booked = {
+      amount_cents: applyRateE8(input.amountCents, old.rate_e8),
+      original_amount_cents: input.amountCents,
+      original_currency: old.original_currency,
+      rate_e8: old.rate_e8,
+    };
+  }
+
+  // Splits are allocated over the converted total, once, as on create.
+  const splits = computeSplits({
+    ...input,
+    currency: entryCurrency,
+    targetCents: booked.amount_cents,
+  });
+
+  // The form sends a bare date; keep the stored timestamp when the day is the same.
+  const spentAt =
+    input.spentAt === undefined || input.spentAt.slice(0, 10) === old.spent_at.slice(0, 10)
+      ? old.spent_at
+      : input.spentAt;
+
+  const proposed: ExpenseSnapshot = {
+    expense: {
+      ...old,
+      ...booked,
+      description: input.description.trim(),
+      paid_by: input.paidBy,
+      category: input.category ?? 'general',
+      split_type: input.splitType,
+      spent_at: spentAt,
+    },
+    splits,
+  };
+  const fields = changedFields(before, proposed);
+  if (fields.length === 0) return { amountCents: old.amount_cents, detached: false };
+
+  const detached = old.recurring_id !== null;
+
+  const tx = db.transaction(() => {
+    db.prepare(
+      `UPDATE expenses
+          SET description = ?, amount_cents = ?, paid_by = ?, category = ?, split_type = ?,
+              spent_at = ?, original_amount_cents = ?, original_currency = ?, rate_e8 = ?,
+              recurring_id = ?, period = ?
+        WHERE id = ? AND group_id = ?`
+    ).run(
+      proposed.expense.description,
+      booked.amount_cents,
+      input.paidBy,
+      proposed.expense.category,
+      input.splitType,
+      spentAt,
+      booked.original_amount_cents,
+      booked.original_currency,
+      booked.rate_e8,
+      detached ? null : old.recurring_id,
+      detached ? null : old.period,
+      expenseId,
+      input.groupId
+    );
+
+    // An edited posting is a one-off now. Its period stays claimed so the
+    // schedule never posts a second one for it.
+    if (detached) {
+      db.prepare(
+        'INSERT OR REPLACE INTO recurring_detached (recurring_id, period, expense_id) VALUES (?, ?, ?)'
+      ).run(old.recurring_id, old.period, expenseId);
+    }
+
+    db.prepare('DELETE FROM expense_splits WHERE expense_id = ?').run(expenseId);
+    const insertSplit = db.prepare(
+      'INSERT INTO expense_splits (expense_id, member_id, amount_cents, weight) VALUES (?, ?, ?, ?)'
+    );
+    for (const s of splits) insertSplit.run(expenseId, s.member_id, s.amount_cents, s.weight);
+
+    const after = snapshotExpense(expenseId)!;
+    const actor = actorName(input.groupId, input.actorId);
+    logActivity({
+      groupId: input.groupId,
+      kind: 'expense_edited',
+      actorId: input.actorId ?? null,
+      actorName: actor,
+      summary: expenseEditedSummary(actor, after.expense.description, fields, detached),
+      amountBefore: old.amount_cents,
+      amountAfter: after.expense.amount_cents,
+      expenseId,
+      before,
+      after,
+    });
+  });
+
+  tx();
+  return { amountCents: booked.amount_cents, detached };
+}
+
+export function deleteExpense(id: number, actorId: number | null = null): void {
+  const tx = db.transaction(() => {
+    const before = snapshotExpense(id);
+    if (!before) return;
+    const { group_id: groupId, description, amount_cents } = before.expense;
+    db.prepare('DELETE FROM expenses WHERE id = ?').run(id);
+
+    const actor = actorName(groupId, actorId);
+    logActivity({
+      groupId,
+      kind: 'expense_deleted',
+      actorId,
+      actorName: actor,
+      summary: expenseDeletedSummary(actor, description, amount_cents, groupCurrency(groupId)),
+      amountBefore: amount_cents,
+      amountAfter: null,
+      expenseId: id,
+      before,
+    });
+  });
+  tx();
+}
+
+function groupCurrency(groupId: number): string {
+  return getGroup(groupId)?.currency ?? 'USD';
 }
 
 /* ------------------------------------------------------------- settlements */
@@ -482,6 +706,8 @@ export function createSettlement(input: {
   amountCents: number;
   currency?: string;
   note?: string;
+  /** The acting-as member the activity log credits. Omitted or null: Tally posted it. */
+  actorId?: number | null;
 }): number {
   if (input.fromMemberId === input.toMemberId) {
     throw new Error('A settlement needs two different people.');
@@ -496,28 +722,82 @@ export function createSettlement(input: {
     throw new Error('That amount converts to zero in this group’s currency.');
   }
 
-  const info = db
-    .prepare(
-      `INSERT INTO settlements
-         (group_id, from_member_id, to_member_id, amount_cents, note,
-          original_amount_cents, original_currency, rate_e8)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-    )
-    .run(
-      input.groupId,
-      input.fromMemberId,
-      input.toMemberId,
-      booked.amount_cents,
-      input.note?.trim() ?? '',
-      booked.original_amount_cents,
-      booked.original_currency,
-      booked.rate_e8
-    );
-  return Number(info.lastInsertRowid);
+  const tx = db.transaction(() => {
+    const info = db
+      .prepare(
+        `INSERT INTO settlements
+           (group_id, from_member_id, to_member_id, amount_cents, note,
+            original_amount_cents, original_currency, rate_e8)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        input.groupId,
+        input.fromMemberId,
+        input.toMemberId,
+        booked.amount_cents,
+        input.note?.trim() ?? '',
+        booked.original_amount_cents,
+        booked.original_currency,
+        booked.rate_e8
+      );
+    const settlementId = Number(info.lastInsertRowid);
+
+    const actor = actorName(input.groupId, input.actorId);
+    logActivity({
+      groupId: input.groupId,
+      kind: 'settlement_created',
+      actorId: input.actorId ?? null,
+      actorName: actor,
+      summary: settlementSummary(
+        'settlement_created',
+        actor,
+        booked.amount_cents,
+        group.currency,
+        memberName(input.fromMemberId),
+        memberName(input.toMemberId)
+      ),
+      amountBefore: null,
+      amountAfter: booked.amount_cents,
+      settlementId,
+      after: snapshotSettlement(settlementId)!,
+    });
+    return settlementId;
+  });
+
+  return tx();
 }
 
-export function deleteSettlement(id: number): void {
-  db.prepare('DELETE FROM settlements WHERE id = ?').run(id);
+export function deleteSettlement(id: number, actorId: number | null = null): void {
+  const tx = db.transaction(() => {
+    const before = snapshotSettlement(id);
+    if (!before) return;
+    const { group_id: groupId, amount_cents, from_member_id, to_member_id } = before.settlement;
+    // Read the names before the row goes, while it still points at them.
+    const fromName = memberName(from_member_id);
+    const toName = memberName(to_member_id);
+    db.prepare('DELETE FROM settlements WHERE id = ?').run(id);
+
+    const actor = actorName(groupId, actorId);
+    logActivity({
+      groupId,
+      kind: 'settlement_deleted',
+      actorId,
+      actorName: actor,
+      summary: settlementSummary(
+        'settlement_deleted',
+        actor,
+        amount_cents,
+        groupCurrency(groupId),
+        fromName,
+        toName
+      ),
+      amountBefore: amount_cents,
+      amountAfter: null,
+      settlementId: id,
+      before,
+    });
+  });
+  tx();
 }
 
 /* ---------------------------------------------------------------- balances */

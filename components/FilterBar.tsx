@@ -51,12 +51,16 @@ export default function FilterBar({
       next.forEach((v) => p.append(key, v));
     });
 
-  // The budget month isn't a ledger filter, so clearing filters keeps it.
+  // The budget month, the open tab and the activity filters aren't ledger
+  // filters, so clearing filters keeps them.
   const clearAll = () => {
-    const month = searchParams.get('month');
-    router.replace(month ? `${pathname}?month=${encodeURIComponent(month)}` : pathname, {
-      scroll: false,
-    });
+    const kept = new URLSearchParams();
+    for (const key of ['month', 'tab', 'activity_actor', 'activity_kind']) {
+      const value = searchParams.get(key);
+      if (value) kept.set(key, value);
+    }
+    const query = kept.toString();
+    router.replace(query ? `${pathname}?${query}` : pathname, { scroll: false });
   };
 
   const chip = (active: boolean) =>

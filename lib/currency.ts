@@ -40,6 +40,18 @@ export function convertMinorUnits(amount: number, fromRateE8: number, toRateE8: 
   return Number(divideRounded(BigInt(amount) * BigInt(toRateE8), BigInt(fromRateE8)));
 }
 
+/**
+ * Apply a stored from→to rate (scaled by 1e8) to an amount: the conversion an
+ * edit uses so an expense keeps the rate it was booked at, whatever the rate
+ * table says today. Same half-away-from-zero BigInt rounding as above.
+ */
+export function applyRateE8(amount: number, rateE8: number): number {
+  if (!Number.isInteger(amount)) throw new Error('Amounts must be whole minor units.');
+  if (rateE8 <= 0) throw new Error('Exchange rates must be above zero.');
+  if (rateE8 === RATE_SCALE) return amount; // same currency: never round
+  return Number(divideRounded(BigInt(amount) * BigInt(rateE8), BigInt(RATE_SCALE)));
+}
+
 /** The effective from→to rate, scaled by 1e8, stored for auditability. */
 export function effectiveRateE8(fromRateE8: number, toRateE8: number): number {
   if (fromRateE8 === toRateE8) return RATE_SCALE;
