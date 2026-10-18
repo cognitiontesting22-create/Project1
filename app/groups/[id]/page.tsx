@@ -1,6 +1,8 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { deleteGroupAction } from '@/app/actions';
+import ActingAsPicker from '@/components/ActingAsPicker';
+import ActivityList from '@/components/ActivityList';
 import AddExpenseButton from '@/components/AddExpenseButton';
 import { AvatarStack } from '@/components/Avatar';
 import { BalancesCard, SettleUpCard } from '@/components/BalancesPanel';
@@ -13,6 +15,10 @@ import RecurringPanel from '@/components/RecurringPanel';
 import SettlementList from '@/components/SettlementList';
 import SettleUpButton from '@/components/SettleUpButton';
 import Tabs from '@/components/Tabs';
+import { activityFiltersFrom } from '@/lib/activity';
+import { listActivity } from '@/lib/activity-queries';
+import { currentActor } from '@/lib/actor';
+import { undoableNow } from '@/lib/undo';
 import { outstandingCents, simplifyDebts } from '@/lib/balances';
 import { getBudgetReport } from '@/lib/budget-queries';
 import { currentMonth, isEditableMonth, isMonth } from '@/lib/budgets';
@@ -77,6 +83,11 @@ export default async function GroupPage({
     typeof query.month === 'string' && isMonth(query.month) ? query.month : thisMonth;
   const budgets = getBudgetReport(groupId, budgetMonth);
 
+  // Read after postDueItems, so anything Tally just posted is already in the log.
+  // Its filters are its own: they never touch the ledger, balances or budgets.
+  const activity = listActivity(groupId, activityFiltersFrom(query));
+  const actor = await currentActor(groupId);
+
   const totalSpent = expenses.reduce((sum, e) => sum + e.amount_cents, 0);
   const outstanding = outstandingCents(balances);
   const topCategory = categories[0];
@@ -122,6 +133,9 @@ export default async function GroupPage({
           <div className="flex flex-wrap gap-2">
             {members.length > 0 && (
               <>
+                {actor && (
+                  <ActingAsPicker groupId={groupId} members={members} actorId={actor.id} />
+                )}
                 <AddExpenseButton
                   groupId={groupId}
                   members={members}
@@ -186,6 +200,7 @@ export default async function GroupPage({
           <div className="grid gap-6 lg:grid-cols-[1.6fr_1fr]">
             <section>
               <Tabs
+                initialTab={typeof query.tab === 'string' ? query.tab : undefined}
                 tabs={[
                   {
                     id: 'expenses',
@@ -196,6 +211,8 @@ export default async function GroupPage({
                         expenses={expenses}
                         currency={group.currency}
                         groupId={groupId}
+                        members={members}
+                        rates={rates}
                       />
                     ),
                   },
@@ -208,6 +225,20 @@ export default async function GroupPage({
                         settlements={settlements}
                         currency={group.currency}
                         groupId={groupId}
+                      />
+                    ),
+                  },
+                  {
+                    id: 'activity',
+                    label: 'Activity',
+                    count: activity.length,
+                    panel: (
+                      <ActivityList
+                        groupId={groupId}
+                        entries={activity}
+                        undoable={undoableNow(groupId)}
+                        members={members}
+                        currency={group.currency}
                       />
                     ),
                   },

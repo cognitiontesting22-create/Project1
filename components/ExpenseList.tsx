@@ -2,17 +2,29 @@ import { deleteExpenseAction } from '@/app/actions';
 import { dateBucket, formatDate } from '@/lib/dates';
 import { RATE_SCALE } from '@/lib/currency';
 import { formatBasisPoints, formatCents, formatShares } from '@/lib/money';
-import { categoryMeta, SPLIT_LABELS, type ExpenseWithSplits } from '@/lib/types';
+import {
+  categoryMeta,
+  SPLIT_LABELS,
+  type ExchangeRate,
+  type ExpenseWithSplits,
+  type Member,
+} from '@/lib/types';
+import AddExpenseButton from './AddExpenseButton';
 import Avatar from './Avatar';
 
 export default function ExpenseList({
   expenses,
   currency,
   groupId,
+  members,
+  rates,
 }: {
   expenses: ExpenseWithSplits[];
   currency: string;
   groupId: number;
+  /** For the edit form, which offers the same people and currencies as Add expense. */
+  members: Member[];
+  rates: ExchangeRate[];
 }) {
   if (expenses.length === 0) {
     return (
@@ -113,13 +125,25 @@ export default function ExpenseList({
                   ))}
                 </ul>
 
-                <form action={deleteExpenseAction} className="mt-3 flex justify-end">
-                  <input type="hidden" name="groupId" value={groupId} />
-                  <input type="hidden" name="expenseId" value={e.id} />
-                  <button type="submit" className="btn-danger px-3 py-1.5 text-xs">
-                    Delete expense
-                  </button>
-                </form>
+                <div className="mt-3 flex justify-end gap-2">
+                  {/* Plan interest is part of terms someone agreed to: never editable. */}
+                  {e.source !== 'plan' && (
+                    <AddExpenseButton
+                      groupId={groupId}
+                      members={members}
+                      currency={currency}
+                      rates={rates}
+                      expense={e}
+                    />
+                  )}
+                  <form action={deleteExpenseAction}>
+                    <input type="hidden" name="groupId" value={groupId} />
+                    <input type="hidden" name="expenseId" value={e.id} />
+                    <button type="submit" className="btn-danger px-3 py-1.5 text-xs">
+                      Delete expense
+                    </button>
+                  </form>
+                </div>
               </div>
             </details>
           </div>

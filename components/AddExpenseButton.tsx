@@ -1,7 +1,7 @@
 'use client';
 
 import { useActionState, useEffect, useMemo, useState } from 'react';
-import { createExpenseAction, type ActionResult } from '@/app/actions';
+import { createExpenseAction, updateExpenseAction, type ActionResult } from '@/app/actions';
 import {
   FULL_PERCENT_BP,
   formatBasisPoints,
@@ -12,7 +12,13 @@ import {
   toBasisPoints,
   toCents,
 } from '@/lib/money';
-import { CATEGORIES, type ExchangeRate, type Member, type SplitType } from '@/lib/types';
+import {
+  CATEGORIES,
+  type ExchangeRate,
+  type ExpenseWithSplits,
+  type Member,
+  type SplitType,
+} from '@/lib/types';
 import AmountWithCurrency from './AmountWithCurrency';
 import Avatar from './Avatar';
 import Modal from './Modal';
@@ -31,33 +37,84 @@ function todayLocal(): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
+/**
+ * The form's starting state: blank for a new expense, or an existing one's
+ * values as they were typed, so an edit opens exactly where the last save left it.
+ */
+function initialState(members: Member[], currency: string, expense?: ExpenseWithSplits) {
+  if (!expense) {
+    return {
+      amount: '',
+      entryCurrency: currency,
+      splitType: 'equal' as SplitType,
+      selected: members.map((m) => m.id),
+      values: {} as Record<number, string>,
+      category: 'general',
+    };
+  }
+
+  const ids = expense.splits.map((s) => s.member_id);
+  // Exact amounts were typed in the entry currency but are stored converted, so
+  // spread the typed total back over the stored shares. For a same-currency
+  // expense this returns the stored amounts unchanged.
+  const typed =
+    expense.split_type === 'exact'
+      ? splitByWeights(
+          expense.original_amount_cents,
+          expense.splits.map((s) => s.amount_cents)
+        )
+      : expense.splits.map((s) => s.weight ?? 0);
+
+  return {
+    amount: hundredthsToInput(expense.original_amount_cents),
+    entryCurrency: expense.original_currency,
+    splitType: expense.split_type,
+    selected: ids,
+    values:
+      expense.split_type === 'equal'
+        ? ({} as Record<number, string>)
+        : Object.fromEntries(ids.map((id, i) => [id, hundredthsToInput(typed[i])])),
+    category: expense.category,
+  };
+}
+
+/**
+ * Adds an expense, or with `expense` given edits that one in place: the same
+ * form, prefilled, saving through the same validation.
+ */
 export default function AddExpenseButton({
   groupId,
   members,
   currency,
   rates,
+  expense,
 }: {
   groupId: number;
   members: Member[];
   /** The group's currency — what balances are kept in. */
   currency: string;
   rates: ExchangeRate[];
+  /** The expense to edit. Omitted for a new one. */
+  expense?: ExpenseWithSplits;
 }) {
+  const editing = expense !== undefined;
+  const [initial] = useState(() => initialState(members, currency, expense));
   const [open, setOpen] = useState(false);
-  const [amount, setAmount] = useState('');
+  const [amount, setAmount] = useState(initial.amount);
   // The modal works entirely in the currency being typed; the conversion to the
   // group's currency is shown once, under the amount field.
-  const [entryCurrency, setEntryCurrency] = useState(currency);
-  const [splitType, setSplitType] = useState<SplitType>('equal');
-  const [selected, setSelected] = useState<number[]>(() => members.map((m) => m.id));
-  const [values, setValues] = useState<Record<number, string>>({});
-  const [category, setCategory] = useState('general');
+  const [entryCurrency, setEntryCurrency] = useState(initial.entryCurrency);
+  const [splitType, setSplitType] = useState<SplitType>(initial.splitType);
+  const [selected, setSelected] = useState<number[]>(initial.selected);
+  const [values, setValues] = useState<Record<number, string>>(initial.values);
+  const [category, setCategory] = useState(initial.category);
   // Until someone edits a field by hand, the inputs track an even split so the
-  // form is never sitting in a state the server would reject.
-  const [touched, setTouched] = useState(false);
+  // form is never sitting in a state the server would reject. An edit starts
+  // from what was saved, so it counts as already touched.
+  const [touched, setTouched] = useState(editing);
 
   const [state, formAction] = useActionState<ActionResult | null, FormData>(
-    createExpenseAction,
+    editing ? updateExpenseAction : createExpenseAction,
     null
   );
 
@@ -84,13 +141,14 @@ export default function AddExpenseButton({
   }, [evenValues, touched, splitType]);
 
   const reset = () => {
-    setAmount('');
-    setValues({});
-    setSplitType('equal');
-    setCategory('general');
-    setEntryCurrency(currency);
-    setTouched(false);
-    setSelected(members.map((m) => m.id));
+    const next = initialState(members, currency, expense);
+    setAmount(next.amount);
+    setValues(next.values);
+    setSplitType(next.splitType);
+    setCategory(next.category);
+    setEntryCurrency(next.entryCurrency);
+    setTouched(editing);
+    setSelected(next.selected);
   };
 
   useEffect(() => {
@@ -178,18 +236,33 @@ export default function AddExpenseButton({
 
   return (
     <>
-      <button type="button" onClick={() => setOpen(true)} className="btn-primary">
-        <span aria-hidden>＋</span> Add expense
-      </button>
+      {editing ? (
+        <button
+          type="button"
+          onClick={() => {
+            // Always open on the expense as currently saved.
+            reset();
+            setOpen(true);
+          }}
+          className="btn-ghost px-3 py-1.5 text-xs"
+        >
+          Edit expense
+        </button>
+      ) : (
+        <button type="button" onClick={() => setOpen(true)} className="btn-primary">
+          <span aria-hidden>＋</span> Add expense
+        </button>
+      )}
 
       <Modal
         open={open}
         onClose={() => setOpen(false)}
-        title="Add an expense"
+        title={editing ? 'Edit expense' : 'Add an expense'}
         subtitle="Who paid, how much, and how should it be split?"
       >
         <form action={formAction} className="space-y-5">
           <input type="hidden" name="groupId" value={groupId} />
+          {editing && <input type="hidden" name="expenseId" value={expense.id} />}
           <input type="hidden" name="splitType" value={splitType} />
           <input type="hidden" name="category" value={category} />
 
@@ -203,6 +276,7 @@ export default function AddExpenseButton({
                 name="description"
                 required
                 autoFocus
+                defaultValue={expense?.description}
                 placeholder="Dinner at Ichiran"
                 className="input"
               />
@@ -223,7 +297,12 @@ export default function AddExpenseButton({
               <label className="label" htmlFor="exp-paidby">
                 Paid by
               </label>
-              <select id="exp-paidby" name="paidBy" className="input" defaultValue={members[0]?.id}>
+              <select
+                id="exp-paidby"
+                name="paidBy"
+                className="input"
+                defaultValue={expense?.paid_by ?? members[0]?.id}
+              >
                 {members.map((m) => (
                   <option key={m.id} value={m.id}>
                     {m.name}
@@ -239,7 +318,7 @@ export default function AddExpenseButton({
                 id="exp-date"
                 name="spentAt"
                 type="date"
-                defaultValue={todayLocal()}
+                defaultValue={expense ? expense.spent_at.slice(0, 10) : todayLocal()}
                 className="input"
               />
             </div>
@@ -391,6 +470,13 @@ export default function AddExpenseButton({
             )}
           </div>
 
+          {expense?.source === 'recurring' && (
+            <p className="rounded-xl bg-amber-500/10 px-3.5 py-2.5 text-sm text-amber-300">
+              This expense was posted by a recurring schedule. Saving changes detaches it from the
+              schedule.
+            </p>
+          )}
+
           {state && !state.ok && <ErrorNote message={state.error} />}
 
           <div className="flex gap-2">
@@ -399,10 +485,10 @@ export default function AddExpenseButton({
             </button>
             <SubmitButton
               className="btn-primary flex-1"
-              pendingLabel="Adding…"
+              pendingLabel={editing ? 'Saving…' : 'Adding…'}
               disabled={!canSubmit}
             >
-              Add expense
+              {editing ? 'Save changes' : 'Add expense'}
             </SubmitButton>
           </div>
         </form>

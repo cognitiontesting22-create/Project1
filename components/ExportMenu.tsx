@@ -18,6 +18,11 @@ const DATASETS = [
     label: 'Payments',
     hint: 'Settlements between people',
   },
+  {
+    id: 'activity',
+    label: 'Activity',
+    hint: 'Who added, edited, deleted or undid what',
+  },
 ];
 
 export default function ExportMenu({
@@ -48,9 +53,18 @@ export default function ExportMenu({
   }, [open]);
 
   const href = (dataset: string) => {
-    const params = new URLSearchParams(query);
-    params.set('dataset', dataset);
-    return `/api/groups/${groupId}/export?${params.toString()}`;
+    const page = new URLSearchParams(query);
+    if (dataset === 'activity') {
+      // The log follows the Activity tab's own filters, not the ledger's.
+      const params = new URLSearchParams({ dataset });
+      const actor = page.get('activity_actor');
+      const kind = page.get('activity_kind');
+      if (actor) params.set('actor', actor);
+      if (kind) params.set('kind', kind);
+      return `/api/groups/${groupId}/export?${params.toString()}`;
+    }
+    page.set('dataset', dataset);
+    return `/api/groups/${groupId}/export?${page.toString()}`;
   };
 
   return (

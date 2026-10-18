@@ -8,10 +8,15 @@ import { useState } from 'react';
  */
 export default function Tabs({
   tabs,
+  initialTab,
 }: {
   tabs: { id: string; label: string; count?: number; panel: React.ReactNode }[];
+  /** The tab to open on, e.g. from ?tab= in the URL. Unknown ids fall back to the first. */
+  initialTab?: string;
 }) {
-  const [active, setActive] = useState(tabs[0]?.id);
+  const [active, setActive] = useState(
+    tabs.some((t) => t.id === initialTab) ? initialTab : tabs[0]?.id
+  );
   const current = tabs.find((t) => t.id === active) ?? tabs[0];
 
   return (

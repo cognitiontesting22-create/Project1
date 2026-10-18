@@ -1,4 +1,6 @@
 import { NextResponse } from 'next/server';
+import { activityCsvTable, parseActivityParams } from '@/lib/activity';
+import { listActivity } from '@/lib/activity-queries';
 import { RATE_SCALE } from '@/lib/currency';
 import { csvAmount, safeFilename, toCsv, type CsvValue } from '@/lib/csv';
 import { filterParamErrors, parseFilters, type LedgerFilters } from '@/lib/filters';
@@ -10,11 +12,12 @@ import {
   listSettlements,
 } from '@/lib/queries';
 import { today } from '@/lib/schedule';
+import { postDueItems } from '@/lib/scheduling-queries';
 import { SPLIT_LABELS, categoryMeta } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
 
-const DATASETS = ['expenses', 'balances', 'payments'] as const;
+const DATASETS = ['expenses', 'balances', 'payments', 'activity'] as const;
 type Dataset = (typeof DATASETS)[number];
 
 /** 1 unit of the original currency in group currency, for the audit column. */
@@ -170,6 +173,17 @@ export async function GET(
   }
   const dataset = requested as Dataset;
 
+  // The activity log has its own filters (kind, since, actor); ledger filters
+  // don't apply to it.
+  if (dataset === 'activity') {
+    const parsed = parseActivityParams(url.searchParams);
+    if ('error' in parsed) return NextResponse.json({ error: parsed.error }, { status: 400 });
+    postDueItems(groupId);
+    const entries = listActivity(groupId, parsed.filters);
+    const { headers, rows } = activityCsvTable(entries, group.currency);
+    return csvResponse(headers, rows, `${safeFilename(group.name)}-activity-${today()}.csv`);
+  }
+
   // Reject bad parameters instead of quietly exporting a different scope.
   const errors = filterParamErrors(url.searchParams);
   if (errors.length) {
@@ -187,8 +201,10 @@ export async function GET(
   const { headers, rows } = build(groupId, filters, group.currency);
 
   const suffix = filters.to ?? today();
-  const filename = `${safeFilename(group.name)}-${dataset}-${suffix}.csv`;
+  return csvResponse(headers, rows, `${safeFilename(group.name)}-${dataset}-${suffix}.csv`);
+}
 
+function csvResponse(headers: string[], rows: CsvValue[][], filename: string) {
   return new NextResponse(toCsv(headers, rows), {
     headers: {
       'Content-Type': 'text/csv; charset=utf-8',

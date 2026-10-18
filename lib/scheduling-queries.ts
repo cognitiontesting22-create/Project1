@@ -210,11 +210,16 @@ function postDueRecurrences(groupId: number): number {
     const values: Record<number, number> = {};
     for (const p of participants) if (p.value !== null) values[p.member_id] = p.value;
 
+    // A period counts as posted while an expense holds it, and forever once the
+    // expense posted for it was edited into a one-off (recurring_detached).
     const alreadyPosted = new Set(
       (
         db
-          .prepare('SELECT period FROM expenses WHERE recurring_id = ?')
-          .all(r.id) as { period: string }[]
+          .prepare(
+            `SELECT period FROM expenses WHERE recurring_id = @id
+             UNION SELECT period FROM recurring_detached WHERE recurring_id = @id`
+          )
+          .all({ id: r.id }) as { period: string }[]
       ).map((row) => row.period)
     );
 
